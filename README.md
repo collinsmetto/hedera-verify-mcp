@@ -121,6 +121,12 @@ npm run dev
 |-----------------------|----------|------------------------------------------------------------------|
 | `TRUSTANCHOR_API_URL` | ✅        | Backend API URL (default: `https://hedera-document-auth.vercel.app`) |
 | `TRUSTANCHOR_API_KEY` | ✅        | Your API key for the TrustAnchor backend                         |
+| `MCP_AUTH_TOKEN`      | HTTP, private | Bearer token clients must send to `/mcp`. Ignored when `ZANORA_API_KEY` is set |
+| `ZANORA_API_KEY`      | HTTP, selling | Zanora provider key. Makes `/mcp` public and charges for every tool call |
+| `ZANORA_PUBLIC_URL`   | HTTP, selling | The public `https://.../mcp` URL buyers call                     |
+| `ZANORA_PRICE_VERIFY` | HTTP, selling | Price per `verify_document_hash` call, like `$0.01`              |
+| `ZANORA_PRICE_TIMESTAMP` | HTTP, selling | Price per `timestamp_document_hash` call, like `$0.25`        |
+| `PORT`                | ❌        | HTTP server port (default: `3000`). Most hosts set this for you  |
 
 ---
 
@@ -179,6 +185,114 @@ Add to your Cursor MCP config (`%APPDATA%\Cursor\User\globalStorage\mcp.json` on
 ## Windsurf / Other MCP Clients
 
 Any MCP-compatible client that supports stdio transport can use this server with the same config pattern above. Point `command` at `npx` and pass `["-y", "@yoseph-ai/hedera-verify-mcp"]` as args.
+
+---
+
+## Self-Hosting over HTTP
+
+You can also host the server so clients connect to `https://your-host/mcp` instead of running it locally. It uses the MCP Streamable HTTP transport in stateless mode.
+
+> ⚠️ `timestamp_document_hash` writes to Hedera mainnet using your TrustAnchor API key, so the HTTP server won't start unless it can gate calls. Set `MCP_AUTH_TOKEN` for private access, or `ZANORA_API_KEY` to [sell the tools](#selling-on-zanora). Everyone with the token shares that key, so only give it to clients you trust.
+
+### Run locally
+
+```bash
+npm install
+cp .env.example .env
+# Set TRUSTANCHOR_API_KEY and MCP_AUTH_TOKEN in .env
+npm run build
+node dist/http.js
+```
+
+The server listens on `http://localhost:3000/mcp`.
+
+### Run with Docker
+
+```bash
+docker build -t hedera-verify-mcp .
+docker run -p 3000:3000 \
+  -e TRUSTANCHOR_API_URL=https://hedera-document-auth.vercel.app \
+  -e TRUSTANCHOR_API_KEY=your-api-key-here \
+  -e MCP_AUTH_TOKEN=your-random-token-here \
+  hedera-verify-mcp
+```
+
+### Deploy
+
+Deploy the `Dockerfile` to any container host, such as Render, Fly.io, Railway or Cloud Run:
+
+1. Generate a token with `openssl rand -hex 32`.
+2. Set `TRUSTANCHOR_API_URL`, `TRUSTANCHOR_API_KEY` and `MCP_AUTH_TOKEN` in the host's environment settings.
+3. Set the host's health check path to `/health`.
+4. Serve it over HTTPS, so the token isn't sent in plain text.
+
+### Test the endpoint
+
+```bash
+curl -X POST https://your-host/mcp \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2025-06-18" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+This should list both tools. Without the `Authorization` header, it returns `401`.
+
+### Connect a client
+
+Clients must be able to send a custom `Authorization` header. For Claude Code:
+
+```bash
+claude mcp add --transport http hedera-verify https://your-host/mcp \
+  --header "Authorization: Bearer your-random-token-here"
+```
+
+---
+
+## Selling on Zanora
+
+You can sell both tools per call on [Zanora](https://docs.zanora.dev/sellers/mcp). Buyers' agents call your URL directly and pay through Zanora, which takes a 5% platform fee. Selling needs Node.js 20+ and the hosted HTTP server, since stdio servers can't be paid for.
+
+When `ZANORA_API_KEY` is set:
+
+- `/mcp` is public, with no bearer token, because payment is the gate. `MCP_AUTH_TOKEN` is ignored and doesn't bypass payment.
+- A tool call without valid payment is refused with a signed price quote, before any request reaches TrustAnchor.
+- If TrustAnchor returns an error, the call fails and the buyer is refunded.
+- A malformed hash is rejected before any charge.
+- `verify_document_hash` still charges when a hash isn't found, because that's a valid answer.
+
+### Set up
+
+1. Create a seller account at [console.zanora.dev](https://console.zanora.dev) and save the provider key.
+2. Add these to your host's environment, and redeploy:
+
+   ```
+   ZANORA_API_KEY=your-provider-key-here
+   ZANORA_PUBLIC_URL=https://your-host/mcp
+   ZANORA_PRICE_VERIFY=$0.01
+   ZANORA_PRICE_TIMESTAMP=$0.25
+   ```
+
+   Prices must include the `$` and be above zero. Set them above what each call costs you, including the platform fee. The prices shown here are only examples.
+
+3. Check the logs for a `Selling cap_...` line for each tool. Both tools are published on startup and updated to match on each restart. If publishing fails, the server won't start.
+4. Request verification under **Seller → Publish** in the console. Buyers can't find your tools until you're approved.
+5. Add a USDC on Base payout address under **Seller → Settings**.
+
+### Test the payment gate
+
+Call a tool with no payment:
+
+```bash
+curl -X POST https://your-host/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2025-06-18" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"timestamp_document_hash","arguments":{"hash":"0000000000000000000000000000000000000000000000000000000000000000"}}}'
+```
+
+The response should contain `PAYMENT_REQUIRED` and a price quote, and nothing should be anchored.
 
 ---
 
