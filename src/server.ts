@@ -2,6 +2,8 @@ import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { SoldCatalogue } from '@zanora/middleware-mcp';
 import { z } from 'zod';
 
 const API_BASE = process.env.TRUSTANCHOR_API_URL;
@@ -12,17 +14,47 @@ if (!API_BASE || !API_KEY) {
   process.exit(1);
 }
 
-export const createServer = () => {
+const hash = z
+  .string()
+  .regex(/^[a-fA-F0-9]{64}$/, 'Expected a SHA-256 hash (64 hex characters)')
+  .describe('SHA-256 hash of the document (64 hex characters)');
+
+export const TOOLS = {
+  verify_document_hash: {
+    description: 'Verify a document hash on Hedera mainnet',
+    inputSchema: { hash },
+  },
+  timestamp_document_hash: {
+    description:
+      'Record a document hash on Hedera mainnet (anchor it). If the hash is already anchored, returns the existing certificate unless force is true.',
+    inputSchema: {
+      hash,
+      force: z.boolean().optional().describe('Anchor again even if the hash already exists. Default: false'),
+    },
+  },
+};
+
+type ToolName = keyof typeof TOOLS;
+type Handler = (args: Record<string, unknown>) => Promise<CallToolResult>;
+
+/** Pass `sold` to charge for every tool. Without it, the tools are free. */
+export const createServer = (sold?: SoldCatalogue) => {
+  const definition = (tool: ToolName) => {
+    const { description, inputSchema } = TOOLS[tool];
+    return { inputSchema, ...(sold ? sold.describe(tool, { description }) : { description }) };
+  };
+  const charged = (tool: ToolName, handler: Handler) => (sold ? sold.paid(tool)(handler) : handler);
+
   const server = new McpServer({
     name: 'hedera-verify-mcp',
     version: '1.0.5',
   });
 
-  server.tool(
+  server.registerTool(
     'verify_document_hash',
-    'Verify a document hash on Hedera mainnet',
-    { hash: z.string().describe('SHA-256 hash of the document (64 hex characters)') },
-    async ({ hash }) => {
+    definition('verify_document_hash'),
+    charged('verify_document_hash', async (args) => {
+      const { hash } = args as { hash: string };
       try {
         const res = await fetch(`${API_BASE}/api/agent/verify`, {
           method: 'POST',
@@ -51,17 +83,14 @@ export const createServer = () => {
         const errorMessage = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text', text: `Fetch failed: ${errorMessage}` }], isError: true };
       }
-    }
+    })
   );
 
-  server.tool(
+  server.registerTool(
     'timestamp_document_hash',
-    'Record a document hash on Hedera mainnet (anchor it). If the hash is already anchored, returns the existing certificate unless force is true.',
-    {
-      hash: z.string().describe('SHA-256 hash of the document (64 hex characters)'),
-      force: z.boolean().optional().describe('Anchor again even if the hash already exists. Default: false'),
-    },
-    async ({ hash, force }) => {
+    definition('timestamp_document_hash'),
+    charged('timestamp_document_hash', async (args) => {
+      const { hash, force } = args as { hash: string; force?: boolean };
       try {
         const res = await fetch(`${API_BASE}/api/agent/anchor`, {
           method: 'POST',
@@ -97,7 +126,7 @@ export const createServer = () => {
         const errorMessage = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text', text: `Fetch failed: ${errorMessage}` }], isError: true };
       }
-    }
+    })
   );
 
   return server;
