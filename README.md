@@ -274,7 +274,7 @@ When `ZANORA_API_KEY` is set:
    ZANORA_PRICE_TIMESTAMP=$0.25
    ```
 
-   Prices must include the `$` and be above zero. Set them above what each call costs you, including the platform fee. The prices shown here are only examples.
+   Prices must be above zero, written like `$0.01` or `0.01`. If you set them from a shell, use `0.01` or single quotes, because the shell expands `$0`. Set them above what each call costs you, including the platform fee. The prices shown here are only examples.
 
 3. Check the logs for a `Selling cap_...` line for each tool. Both tools are published on startup and updated to match on each restart. If publishing fails, the server won't start.
 4. Request verification under **Seller → Publish** in the console. Buyers can't find your tools until you're approved.

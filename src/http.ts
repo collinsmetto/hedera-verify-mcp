@@ -16,18 +16,24 @@ if (!ZANORA_API_KEY && !AUTH_TOKEN) {
   process.exit(1);
 }
 
+// Accepts "$0.01", or "0.01" where a shell or deploy tool mangles the `$`. A bare
+// "100" stays refused because the SDK would list it at $100, and zero would open
+// the mainnet write to anyone. Hosts often keep pasted quotes, so those are removed.
+function priceFrom(name: string) {
+  const value = process.env[name]?.trim().replace(/^(["'])(.*)\1$/, '$2');
+  const match = value?.match(/^\$(\d+(?:\.\d{1,6})?)$|^(\d+\.\d{1,6})$/);
+  const dollars = match?.[1] ?? match?.[2];
+  if (!dollars || Number(dollars) === 0) {
+    throw new Error(`${name} must be a price above zero, like $0.01 or 0.01, but got ${JSON.stringify(value)}`);
+  }
+  return `$${dollars}`;
+}
+
 async function sellTools(apiKey: string) {
   const prices = {
-    verify_document_hash: process.env.ZANORA_PRICE_VERIFY,
-    timestamp_document_hash: process.env.ZANORA_PRICE_TIMESTAMP,
+    verify_document_hash: priceFrom('ZANORA_PRICE_VERIFY'),
+    timestamp_document_hash: priceFrom('ZANORA_PRICE_TIMESTAMP'),
   };
-  // Strict on purpose: the SDK reads a bare "100" as $100, and "$0" would open
-  // the mainnet write to anyone.
-  for (const price of Object.values(prices)) {
-    if (!/^\$\d+(\.\d{1,6})?$/.test(price ?? '') || Number(price?.slice(1)) === 0) {
-      throw new Error('ZANORA_PRICE_VERIFY and ZANORA_PRICE_TIMESTAMP must be above zero, like "$0.01"');
-    }
-  }
 
   const sold = await zanoraSeller({ apiKey }).sellAll({
     tools: Object.entries(TOOLS).map(([tool, { description, inputSchema }]) => ({
@@ -35,7 +41,7 @@ async function sellTools(apiKey: string) {
       description,
       schema: z.toJSONSchema(z.object(inputSchema)) as Record<string, unknown>,
     })),
-    prices: prices as Record<string, string>,
+    prices,
     category: 'Document Verification',
     tags: ['hedera', 'hcs', 'document-verification', 'timestamp', 'blockchain'],
   });
